@@ -36,9 +36,10 @@ The following architectures are supported:
 
 ## Published Images
 
-Docker images are published when a `v*` Git tag is pushed, daily when new commits are
-available, or through the **Build and publish Docker images** workflow's manual trigger.
-Automatic builds (both tag pushes and daily runs) build only these two targets:
+Docker images are published when a `v*` Git tag is pushed or through the
+**Build and publish Docker images** workflow's manual trigger. Normal branch pushes,
+pull requests, and timers do not start builds in this fork. Tag pushes automatically
+build only these two targets:
 
 | Backend | Architecture | Image |
 | --- | --- | --- |
@@ -55,11 +56,9 @@ history. The format is `full-<backend>-<date>-<shortsha>`, for example
 
 Pushing a version tag such as `v1.2.3` also publishes `full-cuda12-v1.2.3` and
 `full-cuda13-v1.2.3`, while updating the usual `full-cuda12` and `full-cuda13` tags.
-The binaries embed version `1.2.3`. Tag builds run even if the same commit was already
-built by the daily workflow. Only successful scheduled builds move the
-`last-docker-build` marker; manual selections and releases do not. Use Docker-compatible
-version tag names containing only letters, digits, underscores, dots, and hyphens
-(at most 116 characters).
+The binaries embed version `1.2.3`. Every tag push builds the selected commit.
+Use Docker-compatible version tag names containing only letters, digits, underscores,
+dots, and hyphens (at most 116 characters).
 
 After committing the changes you want to release, create and push a new tag:
 
@@ -75,7 +74,7 @@ docker pull ghcr.io/xbl916/audio.cpp:full-cuda12-v1.2.3
 Use `gh workflow run` after authenticating GitHub CLI. The `backends` input accepts
 `cpu,cuda12,cuda13,vulkan`; `architectures` accepts `amd64,arm64`. Values are
 comma-separated and every selected backend is built for every selected architecture.
-Defaults are `cuda12,cuda13` and `amd64`. Manual runs default to `force_build=true`.
+Defaults are `cuda12,cuda13` and `amd64`. Manual runs always build the selected ref.
 
 ```bash
 # CPU and Vulkan, amd64 only, from the current main branch:
@@ -115,6 +114,19 @@ The tag must be pushed to GitHub; creating it locally does not start a build. Ch
 the workflow's event in Actions: `push` means an automatic tag build, while
 `workflow_dispatch` means a manual run. A successful manual run verifies the build
 but does not verify that the push trigger fired.
+
+### Optional compile checks
+
+The Windows, Linux, macOS, Nix, and server memory checks are manual-only. They do
+not publish Docker images. Run a specific check from the current main branch:
+
+```bash
+gh workflow run windows-build.yml --repo xbl916/audio.cpp --ref main
+gh workflow run linux-build.yml --repo xbl916/audio.cpp --ref main
+gh workflow run mac-build.yml --repo xbl916/audio.cpp --ref main
+gh workflow run nix-build.yml --repo xbl916/audio.cpp --ref main
+gh workflow run server-memory-guard.yml --repo xbl916/audio.cpp --ref main
+```
 
 ### Optional binary release packages
 

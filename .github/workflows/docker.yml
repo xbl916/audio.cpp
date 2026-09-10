@@ -19,16 +19,9 @@ on:
   push:
     tags:
       - 'v*'
-  # Runs daily at 03:21 UTC
-  schedule:
-    - cron: '21 3 * * *'
   # or when triggered manually
   workflow_dispatch:
     inputs:
-      force_build:
-        description: 'Force build even if no new commits'
-        type: boolean
-        default: true
       version:
         description: 'audio.cpp version string embedded in the binaries'
         type: string
@@ -51,59 +44,12 @@ permissions:
   packages: write
 
 jobs:
-  # ── Check for new commits ───────────────────────────────────────────────────
-  check-commits:
-    name: Check for new commits
-    runs-on: ubuntu-24.04
-    outputs:
-      skip_build: ${{ steps.check.outputs.skip }}
-      short_sha:  ${{ steps.check.outputs.short_sha }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
-      - name: Check for new commits
-        id: check
-        env:
-          REF_TYPE: ${{ github.ref_type }}
-          FORCE_BUILD: ${{ github.event_name == 'workflow_dispatch' && inputs.force_build }}
-        run: |
-          SHORT_SHA=$(git rev-parse --short=7 HEAD)
-          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-
-          if [[ "$REF_TYPE" == 'tag' ]]; then
-            echo "Version tag — building even if this commit was already built"
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          elif [[ "$FORCE_BUILD" == 'true' ]]; then
-            echo "Manual trigger (force_build=true) — building"
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          else
-            LAST_TAG=$(git tag -l 'last-docker-build' | head -1)
-            if [[ -n "$LAST_TAG" ]]; then
-              LAST_SHA=$(git rev-list -1 "$LAST_TAG" 2>/dev/null || echo "")
-              HEAD_SHA=$(git rev-parse HEAD)
-              if [[ "$LAST_SHA" == "$HEAD_SHA" ]]; then
-                echo "No new commits since last daily build — skipping"
-                echo "skip=true" >> "$GITHUB_OUTPUT"
-              else
-                echo "New commits found — building"
-                echo "skip=false" >> "$GITHUB_OUTPUT"
-              fi
-            else
-              echo "No previous build tag found — building"
-              echo "skip=false" >> "$GITHUB_OUTPUT"
-            fi
-          fi
-
   # ── Shared metadata (date computed once for all jobs) ───────────────────────
   metadata:
     name: Generate metadata
-    needs: check-commits
-    if: ${{ needs.check-commits.outputs.skip_build != 'true' }}
     runs-on: ubuntu-24.04
     outputs:
+      short_sha: ${{ steps.revision.outputs.short_sha }}
       build_date: ${{ steps.date.outputs.date }}
       date_tag:   ${{ steps.date.outputs.tag }}
       app_version: ${{ steps.version.outputs.version }}
@@ -112,6 +58,13 @@ jobs:
       build_matrix: ${{ steps.matrix.outputs.build_matrix }}
       merge_matrix: ${{ steps.matrix.outputs.merge_matrix }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Resolve revision
+        id: revision
+        run: echo "short_sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Select build targets
         id: matrix
         env:
@@ -193,8 +146,7 @@ jobs:
   # ── Build each arch, push by digest ─────────────────────────────────────────
   build:
     name: Build (${{ matrix.tag }}, ${{ matrix.platforms }})
-    needs: [check-commits, metadata]
-    if: ${{ needs.check-commits.outputs.skip_build != 'true' }}
+    needs: metadata
     runs-on: ${{ matrix.runs_on }}
     strategy:
       fail-fast: false
@@ -258,11 +210,9 @@ jobs:
   # ── Merge per-arch digests into multi-arch manifests ────────────────────────
   merge:
     name: Merge (${{ matrix.tag }})
-    needs: [check-commits, metadata, build]
-    # Merge will only run if there was actually a new commit to act on and
-    # if all build jobs succeeded. As soon as one build fails, we won't
-    # produce any merged images.
-    if: ${{ needs.check-commits.outputs.skip_build != 'true' && needs.build.result == 'success' }}
+    needs: [metadata, build]
+    # Publish only after every selected target has built successfully.
+    if: ${{ needs.build.result == 'success' }}
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -295,7 +245,7 @@ jobs:
 
           repo="ghcr.io/${{ needs.metadata.outputs.image_repo }}"
           date_tag="${{ needs.metadata.outputs.date_tag }}"
-          short_sha="${{ needs.check-commits.outputs.short_sha }}"
+          short_sha="${{ needs.metadata.outputs.short_sha }}"
           tag="${{ matrix.tag }}"
           build_date="${{ needs.metadata.outputs.build_date }}"
           image_url="${{ github.server_url }}/${{ github.repository }}"
@@ -336,23 +286,3 @@ jobs:
             echo "  → ${versioned}"
             docker buildx imagetools create "${annotations[@]}" --tag "${repo}:${versioned}" "${refs[@]}"
           fi
-
-  # ── Update last-docker-build tag ────────────────────────────────────────────
-  update-tag:
-    name: Update build tag
-    needs: [check-commits, merge]
-    # Only the daily default build updates this marker. Manual selections may
-    # build a different backend/architecture subset or an older commit.
-    if: ${{ github.event_name == 'schedule' && needs.check-commits.outputs.skip_build != 'true' && needs.merge.result == 'success' }}
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Update last-docker-build tag
-        run: |
-          set -euo pipefail
-          git tag -f last-docker-build HEAD
-          git push origin last-docker-build -f

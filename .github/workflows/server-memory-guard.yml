@@ -6,16 +6,9 @@ name: server-memory-guard cross-platform
 # backend-agnostic (they query memory through ggml_backend_dev_memory), and the
 # existing linux/mac/windows workflows already cover CUDA/Vulkan/Metal builds.
 
+# Optional checks: run explicitly from Actions or with gh workflow run.
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - "app/server/**"
-      - "src/framework/core/host_memory.cpp"
-      - "include/engine/framework/core/backend.h"
-      - "src/framework/core/backend.cpp"
-      - "tests/unittests/test_server_config.cpp"
-      - ".github/workflows/server-memory-guard.yml"
 
 jobs:
   build-test:
