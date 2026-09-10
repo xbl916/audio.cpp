@@ -38,27 +38,28 @@ The following architectures are supported:
 
 Docker images are published when a `v*` Git tag is pushed, daily when new commits are
 available, or through the **Build and publish Docker images** workflow's manual trigger.
-Images are published to `ghcr.io/<owner>/<repository>` (lowercase), so this fork publishes
-to `ghcr.io/xbl916/audio.cpp`. The images are provided
-as multiarch images (amd64/arm64).
+Automatic builds (both tag pushes and daily runs) build only these two targets:
 
-Pull the latest images using these tags:
-- **cuda12**: `ghcr.io/xbl916/audio.cpp:full-cuda12`
-- **cuda13**: `ghcr.io/xbl916/audio.cpp:full-cuda13`
-- **vulkan**: `ghcr.io/xbl916/audio.cpp:full-vulkan`
-- **cpu**: `ghcr.io/xbl916/audio.cpp:full-cpu`
+| Backend | Architecture | Image |
+| --- | --- | --- |
+| CUDA 12 | linux/amd64 | `ghcr.io/xbl916/audio.cpp:full-cuda12` |
+| CUDA 13 | linux/amd64 | `ghcr.io/xbl916/audio.cpp:full-cuda13` |
+
+The workflow publishes to `ghcr.io/<owner>/<repository>` in lowercase. CPU, Vulkan,
+and arm64 builds are available on demand through the manual inputs below.
 
 Images for a specific day/commit can be found in the
 [versions](https://github.com/xbl916/audio.cpp/pkgs/container/audio.cpp/versions?filters%5Bversion_type%5D=tagged)
-history.
-The format is: `full-<backend>-<date>-<shortsha>`, e.g. `full-cuda12-20260725-db7d2c4`
+history. The format is `full-<backend>-<date>-<shortsha>`, for example
+`full-cuda12-20260725-db7d2c4`.
 
-Pushing a version tag such as `v1.2.3` also publishes `full-cpu-v1.2.3`,
-`full-cuda12-v1.2.3`, `full-cuda13-v1.2.3`, and `full-vulkan-v1.2.3`, while updating
-the usual `full-<backend>` tags. The binaries embed version `1.2.3`. Tag builds run
-even if the same commit was already built by the daily workflow, and do not move
-its `last-docker-build` marker. Use Docker-compatible version tag names containing
-only letters, digits, underscores, dots, and hyphens (at most 116 characters).
+Pushing a version tag such as `v1.2.3` also publishes `full-cuda12-v1.2.3` and
+`full-cuda13-v1.2.3`, while updating the usual `full-cuda12` and `full-cuda13` tags.
+The binaries embed version `1.2.3`. Tag builds run even if the same commit was already
+built by the daily workflow. Only successful scheduled builds move the
+`last-docker-build` marker; manual selections and releases do not. Use Docker-compatible
+version tag names containing only letters, digits, underscores, dots, and hyphens
+(at most 116 characters).
 
 After committing the changes you want to release, create and push a new tag:
 
@@ -68,6 +69,52 @@ git push origin v1.2.3
 # After the Docker workflow succeeds:
 docker pull ghcr.io/xbl916/audio.cpp:full-cuda12-v1.2.3
 ```
+
+### Manual builds for other targets
+
+Use `gh workflow run` after authenticating GitHub CLI. The `backends` input accepts
+`cpu,cuda12,cuda13,vulkan`; `architectures` accepts `amd64,arm64`. Values are
+comma-separated and every selected backend is built for every selected architecture.
+Defaults are `cuda12,cuda13` and `amd64`. Manual runs default to `force_build=true`.
+
+```bash
+# CPU and Vulkan, amd64 only, from the current main branch:
+gh workflow run docker.yml --repo xbl916/audio.cpp --ref main \
+  -f backends=cpu,vulkan -f architectures=amd64
+
+# Both CUDA versions, with amd64 and arm64 images:
+gh workflow run docker.yml --repo xbl916/audio.cpp --ref main \
+  -f backends=cuda12,cuda13 -f architectures=amd64,arm64
+
+# CPU, arm64 only:
+gh workflow run docker.yml --repo xbl916/audio.cpp --ref main \
+  -f backends=cpu -f architectures=arm64
+
+# All four backends on both architectures (the previous full build):
+gh workflow run docker.yml --repo xbl916/audio.cpp --ref main \
+  -f backends=cpu,cuda12,cuda13,vulkan -f architectures=amd64,arm64
+
+# Build selected targets from a version tag that contains this workflow:
+gh workflow run docker.yml --repo xbl916/audio.cpp --ref v1.2.3 \
+  -f backends=cpu,vulkan -f architectures=amd64,arm64
+```
+
+A tag ref supplies the embedded version and creates versioned image tags for the
+selected backends. A branch ref defaults to embedded version `dev`; use
+`-f version=1.2.3` to change that embedded version only. Each published backend's
+manifest contains exactly the selected architectures, replacing the previous manifest
+for the same image tag. Unselected backends are not updated.
+
+The selected ref must contain the updated workflow. For example, the existing
+`v0.7.3` tag still contains the previous workflow, which builds all eight combinations;
+use `main` or a newer release tag for these selection inputs.
+
+### Checking the trigger
+
+The tag must be pushed to GitHub; creating it locally does not start a build. Check
+the workflow's event in Actions: `push` means an automatic tag build, while
+`workflow_dispatch` means a manual run. A successful manual run verifies the build
+but does not verify that the push trigger fired.
 
 
 ## Build Images locally

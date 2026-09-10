@@ -1,6 +1,8 @@
 # audio.cpp — Build and publish Docker images
 #
-# Produces multi-arch (amd64, arm64) images on ghcr.io:
+# Automatic builds: CUDA 12 and CUDA 13 on amd64 only.
+# Manual builds can select cpu/cuda12/cuda13/vulkan and amd64/arm64.
+# Produces images on ghcr.io:
 #   full-cpu                     (latest, mutable)
 #   full-cpu-YYYYMMDD-HHHHHHH    (pinned to date + short SHA, immutable)
 #   full-cuda12                  (latest, mutable)
@@ -31,6 +33,14 @@ on:
         description: 'audio.cpp version string embedded in the binaries'
         type: string
         default: dev
+      backends:
+        description: 'Comma-separated backends: cpu,cuda12,cuda13,vulkan'
+        type: string
+        default: cuda12,cuda13
+      architectures:
+        description: 'Comma-separated architectures: amd64,arm64'
+        type: string
+        default: amd64
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
@@ -99,7 +109,50 @@ jobs:
       app_version: ${{ steps.version.outputs.version }}
       release_tag: ${{ steps.version.outputs.release_tag }}
       image_repo: ${{ steps.image_repo.outputs.image_repo }}
+      build_matrix: ${{ steps.matrix.outputs.build_matrix }}
+      merge_matrix: ${{ steps.matrix.outputs.merge_matrix }}
     steps:
+      - name: Select build targets
+        id: matrix
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_BACKENDS: ${{ inputs.backends }}
+          INPUT_ARCHITECTURES: ${{ inputs.architectures }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          def select(value, default, allowed):
+              items = list(dict.fromkeys(item.strip() for item in (value or default).split(',')))
+              if not items or any(item not in allowed for item in items):
+                  raise SystemExit(f"Invalid selection {value!r}; choose from {', '.join(allowed)}")
+              return items
+
+          manual = os.environ['EVENT_NAME'] == 'workflow_dispatch'
+          backends = select(os.environ['INPUT_BACKENDS'] if manual else '',
+                            'cuda12,cuda13', ['cpu', 'cuda12', 'cuda13', 'vulkan'])
+          arches = select(os.environ['INPUT_ARCHITECTURES'] if manual else '',
+                          'amd64', ['amd64', 'arm64'])
+          builds = []
+          for backend in backends:
+              for arch in arches:
+                  entry = {
+                      'tag': backend,
+                      'dockerfile': f".devops/{'cuda' if backend.startswith('cuda') else backend}.Dockerfile",
+                      'platforms': f'linux/{arch}',
+                      'arch': arch,
+                      'runs_on': 'ubuntu-24.04-arm' if arch == 'arm64' else 'ubuntu-24.04',
+                      'cuda_version': {'cuda12': '12.9.2', 'cuda13': '13.3.0'}.get(backend, ''),
+                  }
+                  builds.append(entry)
+          merges = [{'tag': backend, 'arches': ' '.join(arches)} for backend in backends]
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              print('build_matrix=' + json.dumps({'include': builds}), file=output)
+              print('merge_matrix=' + json.dumps({'include': merges}), file=output)
+          print('Selected targets: ' + ', '.join(f"{entry['tag']}/{entry['arch']}" for entry in builds))
+          PY
+
       - name: Get build date
         id: date
         run: |
@@ -145,79 +198,15 @@ jobs:
     runs-on: ${{ matrix.runs_on }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          # ── CPU ──
-          - tag: cpu
-            dockerfile: .devops/cpu.Dockerfile
-            platforms: linux/amd64
-            arch: amd64
-            runs_on: ubuntu-24.04
-            enabled: true
-          - tag: cpu
-            dockerfile: .devops/cpu.Dockerfile
-            platforms: linux/arm64
-            arch: arm64
-            runs_on: ubuntu-24.04-arm
-            enabled: true
-          # ── CUDA 12 ──
-          - tag: cuda12
-            dockerfile: .devops/cuda.Dockerfile
-            platforms: linux/amd64
-            arch: amd64
-            runs_on: ubuntu-24.04
-            cuda_version: "12.9.2"
-            enabled: true
-          - tag: cuda12
-            dockerfile: .devops/cuda.Dockerfile
-            platforms: linux/arm64
-            arch: arm64
-            runs_on: ubuntu-24.04-arm
-            cuda_version: "12.9.2"
-            enabled: true
-          # ── CUDA 13 ──
-          - tag: cuda13
-            dockerfile: .devops/cuda.Dockerfile
-            platforms: linux/amd64
-            arch: amd64
-            runs_on: ubuntu-24.04
-            cuda_version: "13.3.0"
-            enabled: true
-          - tag: cuda13
-            dockerfile: .devops/cuda.Dockerfile
-            platforms: linux/arm64
-            arch: arm64
-            runs_on: ubuntu-24.04-arm
-            cuda_version: "13.3.0"
-            enabled: true
-          # ── Vulkan ──
-          - tag: vulkan
-            dockerfile: .devops/vulkan.Dockerfile
-            platforms: linux/amd64
-            arch: amd64
-            runs_on: ubuntu-24.04
-            enabled: true
-          - tag: vulkan
-            dockerfile: .devops/vulkan.Dockerfile
-            platforms: linux/arm64
-            arch: arm64
-            runs_on: ubuntu-24.04-arm
-            enabled: true
+      matrix: ${{ fromJSON(needs.metadata.outputs.build_matrix) }}
     steps:
-      - name: Skip when not enabled
-        if: ${{ matrix.enabled != true }}
-        run: echo "Skipping ${{ matrix.tag }} build"
-
       - name: Checkout
-        if: ${{ matrix.enabled == true }}
         uses: actions/checkout@v5
 
       - name: Set up Docker Buildx
-        if: ${{ matrix.enabled == true }}
         uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
-        if: ${{ matrix.enabled == true }}
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -226,7 +215,6 @@ jobs:
 
       - name: Build and push
         id: push
-        if: ${{ matrix.enabled == true }}
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -247,7 +235,6 @@ jobs:
           cache-to: type=registry,ref=ghcr.io/${{ needs.metadata.outputs.image_repo }}:cache-${{ matrix.arch }}-${{ matrix.tag }},mode=max
 
       - name: Upload digest
-        if: ${{ matrix.enabled == true }}
         shell: bash
         run: |
           set -euo pipefail
@@ -262,7 +249,6 @@ jobs:
           printf '%s\n' "$digest" > "/tmp/digests/${{ matrix.tag }}-${{ matrix.arch }}.txt"
 
       - name: Save digest artifact
-        if: ${{ matrix.enabled == true }}
         uses: actions/upload-artifact@v7
         with:
           name: digest-${{ matrix.arch }}-${{ matrix.tag }}
@@ -280,8 +266,7 @@ jobs:
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
-      matrix:
-        tag: [cpu, cuda12, cuda13, vulkan]
+      matrix: ${{ fromJSON(needs.metadata.outputs.merge_matrix) }}
     steps:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -304,6 +289,7 @@ jobs:
         shell: bash
         env:
           RELEASE_TAG: ${{ needs.metadata.outputs.release_tag }}
+          EXPECTED_ARCHES: ${{ matrix.arches }}
         run: |
           set -euo pipefail
 
@@ -317,23 +303,19 @@ jobs:
           mutable="full-${tag}"
           immutable="full-${tag}-${date_tag}-${short_sha}"
 
-          # Collect per-arch digests.
-          # Because this job is gated on needs.build.result == 'success', a missing
-          # digest can only mean the variant was intentionally disabled (enabled: false).
-          expected_arches=(amd64 arm64)
+          # Every selected architecture must have produced a digest before publishing.
+          read -r -a expected_arches <<< "$EXPECTED_ARCHES"
           refs=()
           for arch in "${expected_arches[@]}"; do
             file="/tmp/digests/${tag}-${arch}.txt"
-            [ -f "$file" ] || continue
+            if [[ ! -s "$file" ]]; then
+              echo "::error::Missing digest for ${tag}/${arch}"
+              exit 1
+            fi
             refs+=("${repo}@$(cat "$file")")
           done
 
           echo "${tag}: ${#refs[@]}/${#expected_arches[@]} digests merged"
-
-          if [ ${#refs[@]} -eq 0 ]; then
-            echo "  → skipping (all variants disabled)"
-            exit 0
-          fi
 
           # OCI annotations for the merged manifest
           annotations=(
@@ -359,8 +341,9 @@ jobs:
   update-tag:
     name: Update build tag
     needs: [check-commits, merge]
-    # A release can point at an older commit; do not move the daily-build marker.
-    if: ${{ github.ref_type != 'tag' && needs.check-commits.outputs.skip_build != 'true' && needs.merge.result == 'success' }}
+    # Only the daily default build updates this marker. Manual selections may
+    # build a different backend/architecture subset or an older commit.
+    if: ${{ github.event_name == 'schedule' && needs.check-commits.outputs.skip_build != 'true' && needs.merge.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
