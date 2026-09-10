@@ -7,19 +7,17 @@
 # with the heavy CUDA runtime DLLs in a separate cudart...zip, and the release
 # job publishes.
 #
-# Semantic-version, tag-driven releases. The workflow runs when a `v*` (semver)
-# tag is pushed (drafting a Release and Publishing it) or when run manually
-# from the Actions UI with an explicit version. Publishing attaches the built
-# binaries to that version's GitHub Release. There is NO auto-release on every
-# push to `main`.
+# Optional binary releases, started manually with an explicit version.
+# Tag pushes are handled by docker.yml and only build the default CUDA images.
+# Publishing attaches the binaries to the selected version's GitHub Release.
 
-name: Release
+name: Binary release (manual)
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Semantic version to release, e.g. 1.2.0 or v1.2.0 (used for manual runs; tag-triggered runs use the pushed tag).'
+        description: 'Version, e.g. 1.2.0 or v1.2.0. When running from a tag ref, that ref supplies the version.'
         required: true
         default: ''
         type: string
@@ -28,9 +26,6 @@ on:
         required: false
         default: false
         type: boolean
-  push:
-    tags:
-      - 'v*'
 
 env:
   GH_TOKEN: ${{ github.token }}
@@ -49,8 +44,7 @@ jobs:
     outputs:
       should_release: ${{ steps.check.outputs.should_release }}
     steps:
-      # The only triggers are a manually-run workflow or a pushed `v*` tag -
-      # both are intentional, so always proceed.
+      # Every run is explicitly requested through workflow_dispatch.
       - id: check
         run: echo "should_release=true" >> "$GITHUB_OUTPUT"
 
@@ -73,7 +67,7 @@ jobs:
           elif [[ -n "${{ inputs.version }}" ]]; then
             TAG="${{ inputs.version }}"
           else
-            echo "::error::No semver tag or version provided (push a v* tag, or run manually with a version)."
+            echo "::error::No version provided (select a tag ref or supply the version input)."
             exit 1
           fi
           [[ "$TAG" == v* ]] || TAG="v${TAG}"
@@ -463,7 +457,7 @@ jobs:
       - windows-cpu-portable
       - windows-vulkan
       - windows-cuda
-    if: ${{ needs.check-release.outputs.should_release == 'true' && (github.ref_type == 'tag' || inputs.publish) }}
+    if: ${{ needs.check-release.outputs.should_release == 'true' && inputs.publish }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

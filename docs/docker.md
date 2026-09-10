@@ -116,6 +116,27 @@ the workflow's event in Actions: `push` means an automatic tag build, while
 `workflow_dispatch` means a manual run. A successful manual run verifies the build
 but does not verify that the push trigger fired.
 
+### Optional binary release packages
+
+Tag pushes only trigger Docker builds. The separate **Binary release (manual)**
+workflow builds native Windows/Linux/macOS packages and must be started explicitly.
+It does not build Docker images. Use a ref containing this updated workflow:
+
+```bash
+# Build native packages without publishing a GitHub Release:
+gh workflow run release.yml --repo xbl916/audio.cpp --ref main \
+  -f version=1.2.3 -f publish=false
+
+# Build and publish native packages for a release tag:
+gh workflow run release.yml --repo xbl916/audio.cpp --ref v1.2.3 \
+  -f version=1.2.3 -f publish=true
+```
+
+The `publish` input defaults to false, including when a tag ref is selected.
+Existing tags keep the workflow files they originally contained; `v0.7.3-2` still
+contains the old automatic binary-release trigger. New tags must include the
+commit that makes binary releases manual-only.
+
 
 ## Build Images locally
 
