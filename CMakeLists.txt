@@ -2007,6 +2007,7 @@ configure_file(
 add_executable(audiocpp_server
     app/common/build_info.cpp
     app/server/main.cpp
+    app/server/audio_decode.cpp
     app/server/base64.cpp
     app/server/config.cpp
     app/server/http.cpp
@@ -2344,6 +2345,28 @@ if (ENGINE_BUILD_TESTS OR ENGINE_BUILD_EXTENDED_TESTS OR ENGINE_BUILD_MODEL_TEST
         )
         target_include_directories(server_multipart_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/app/server)
         add_test(NAME server_multipart_test COMMAND server_multipart_test)
+
+        add_executable(server_audio_decode_test
+            tests/unittests/test_server_audio_decode.cpp
+            src/framework/audio/wav_reader.cpp
+            app/server/audio_decode.cpp
+        )
+        target_include_directories(server_audio_decode_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/app/server ${CMAKE_CURRENT_SOURCE_DIR}/include)
+        target_link_libraries(server_audio_decode_test PRIVATE Threads::Threads)
+        add_test(NAME server_audio_decode_test COMMAND server_audio_decode_test)
+        set_tests_properties(server_audio_decode_test PROPERTIES TIMEOUT 90)
+        if (UNIX)
+            find_package(Python3 COMPONENTS Interpreter QUIET)
+            find_program(AUDIOCPP_TEST_FFMPEG ffmpeg)
+            if (Python3_Interpreter_FOUND AND AUDIOCPP_TEST_FFMPEG)
+                add_test(NAME server_audio_decode_formats_test
+                    COMMAND ${Python3_EXECUTABLE}
+                        ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests/test_server_audio_decode_formats.py
+                        $<TARGET_FILE:server_audio_decode_test> ${AUDIOCPP_TEST_FFMPEG})
+                set_tests_properties(server_audio_decode_formats_test PROPERTIES TIMEOUT 120)
+            endif()
+        endif()
+
 
         add_executable(server_base64_test
             tests/unittests/test_server_base64.cpp

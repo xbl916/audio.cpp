@@ -1,5 +1,6 @@
 #include "runtime.h"
 
+#include "audio_decode.h"
 #include "base64.h"
 #include "model_memory.h"
 #include "multipart.h"
@@ -456,14 +457,6 @@ HttpResponse chunked_audio_response(std::function<void(HttpStreamWriter &)> stre
     response.content_type = "application/octet-stream";
     response.stream_body = std::move(stream);
     return response;
-}
-
-bool is_wav_upload_filename(const std::string & filename) {
-    std::string ext = std::filesystem::path(filename).extension().string();
-    for (char & ch : ext) {
-        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-    }
-    return ext.empty() || ext == ".wav";
 }
 
 std::string lower_ascii(std::string value) {
@@ -926,6 +919,14 @@ const engine::runtime::AudioBuffer & select_audio_output(const engine::runtime::
     throw std::runtime_error("model result did not contain exactly one audio output");
 }
 
+engine::runtime::AudioBuffer read_uploaded_audio_buffer(std::string_view wav) {
+    try {
+        return minitts::cli::read_audio_buffer(wav);
+    } catch (const std::runtime_error & ex) {
+        throw AudioDecodeError(400, std::string("invalid uploaded audio: ") + ex.what());
+    }
+}
+
 engine::runtime::TaskRequest build_openai_transcription_request(
     const Value & body,
     const std::filesystem::path & base_dir,
@@ -946,7 +947,7 @@ engine::runtime::TaskRequest build_openai_transcription_request(
     if (uploaded_audio_bytes == nullptr) {
         request.audio_input = minitts::cli::read_audio_buffer(resolve_path(base_dir, audio->as_string()));
     } else {
-        request.audio_input = minitts::cli::read_audio_buffer(std::string_view(*uploaded_audio_bytes));
+        request.audio_input = read_uploaded_audio_buffer(std::string_view(*uploaded_audio_bytes));
     }
     request.options = options_from_object(body.find("options"));
     std::string language;
@@ -1204,6 +1205,8 @@ HttpResponse ServerState::handle(const HttpRequest & request) {
     else {
         response = error_response(404, "unknown endpoint: " + request.path, "not_found");
     }
+  } catch (const AudioDecodeError & ex) {
+    response = error_response(ex.status, ex.what(), ex.status < 500 ? "invalid_request_error" : "server_error");
   } catch (const engine::runtime::CapacityError & ex) {
     // The request is too big for the device, which is the caller's to fix --
     // reporting it as 500 sends them looking for a server fault that is not
@@ -2597,12 +2600,6 @@ HttpResponse ServerState::handle_transcription_multipart(
     if (model_id.empty()) {
         throw std::runtime_error("multipart transcription request requires a 'model' field");
     }
-    if (!is_wav_upload_filename(file_part->filename)) {
-        return error_response(
-            400,
-            "only WAV audio uploads are currently supported for transcription; MP3 support is planned",
-            "invalid_request_error");
-    }
 
     engine::io::json::Value::Object fields;
     fields.emplace("model", engine::io::json::Value::make_string(model_id));
@@ -2615,10 +2612,11 @@ HttpResponse ServerState::handle_transcription_multipart(
     const auto body = engine::io::json::Value::make_object(std::move(fields));
 
     auto & model = require_model(body);
+    const auto audio_bytes = decode_uploaded_audio(file_part->data);
     const auto request = apply_default_request_options(
         model,
         build_openai_transcription_request(
-            body, request_base_, model.accepts_language, &file_part->data));
+            body, request_base_, model.accepts_language, &audio_bytes));
     if (stream) {
         if (detail) {
             return error_response(400, kDetailStreamUnsupported, "invalid_request_error");
@@ -2774,12 +2772,6 @@ HttpResponse ServerState::handle_alignment_multipart(const std::string & body_te
             "multipart alignment request requires a non-empty 'text' field",
             "invalid_request_error");
     }
-    if (!is_wav_upload_filename(file_part->filename)) {
-        return error_response(
-            400,
-            "only WAV audio uploads are currently supported for alignment",
-            "invalid_request_error");
-    }
 
     LoadedModel * model_ptr = nullptr;
     {
@@ -2808,7 +2800,8 @@ HttpResponse ServerState::handle_alignment_multipart(const std::string & body_te
     }
 
     engine::runtime::TaskRequest task_request;
-    task_request.audio_input = minitts::cli::read_audio_buffer(std::string_view(file_part->data));
+    const auto audio_bytes = decode_uploaded_audio(file_part->data);
+    task_request.audio_input = read_uploaded_audio_buffer(std::string_view(audio_bytes));
     task_request.text_input = engine::runtime::Transcript{std::move(text), std::move(language)};
     task_request = apply_default_request_options(model, std::move(task_request));
     return run_alignment(model, task_request, busy_timeout_ms);

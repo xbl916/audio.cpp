@@ -9,10 +9,14 @@
 #   full-cuda13-YYYYMMDD-HHHHHHH (pinned to date + short SHA, immutable)
 #   full-vulkan                  (latest, mutable)
 #   full-vulkan-YYYYMMDD-HHHHHHH (pinned to date + short SHA, immutable)
+#   full-<backend>-v<version>    (created by version-tag builds)
 
 name: Build and publish Docker images
 
 on:
+  push:
+    tags:
+      - 'v*'
   # Runs daily at 03:21 UTC
   schedule:
     - cron: '21 3 * * *'
@@ -52,11 +56,17 @@ jobs:
 
       - name: Check for new commits
         id: check
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          FORCE_BUILD: ${{ github.event_name == 'workflow_dispatch' && inputs.force_build }}
         run: |
           SHORT_SHA=$(git rev-parse --short=7 HEAD)
           echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
 
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.force_build }}" == 'true' ]]; then
+          if [[ "$REF_TYPE" == 'tag' ]]; then
+            echo "Version tag — building even if this commit was already built"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          elif [[ "$FORCE_BUILD" == 'true' ]]; then
             echo "Manual trigger (force_build=true) — building"
             echo "skip=false" >> "$GITHUB_OUTPUT"
           else
@@ -87,6 +97,7 @@ jobs:
       build_date: ${{ steps.date.outputs.date }}
       date_tag:   ${{ steps.date.outputs.tag }}
       app_version: ${{ steps.version.outputs.version }}
+      release_tag: ${{ steps.version.outputs.release_tag }}
       image_repo: ${{ steps.image_repo.outputs.image_repo }}
     steps:
       - name: Get build date
@@ -97,13 +108,30 @@ jobs:
 
       - name: Resolve app version
         id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          VERSION="${{ github.event.inputs.version }}"
+          set -euo pipefail
+          RELEASE_TAG=""
+          if [[ "$REF_TYPE" == 'tag' ]]; then
+            # Keep full-<backend>-<tag> within Docker's 128-character tag limit.
+            if [[ ! "$REF_NAME" =~ ^v[A-Za-z0-9_.-]{1,115}$ ]]; then
+              echo "::error::Version tag must use Docker-compatible characters (letters, digits, _, ., -) and be at most 116 characters."
+              exit 1
+            fi
+            RELEASE_TAG="$REF_NAME"
+            VERSION="$REF_NAME"
+          else
+            VERSION="$INPUT_VERSION"
+          fi
           if [[ -z "$VERSION" ]]; then
             VERSION="dev"
           fi
           VERSION="${VERSION#v}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Determine lowercase image repository
         id: image_repo
@@ -274,6 +302,8 @@ jobs:
 
       - name: Create manifest
         shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.metadata.outputs.release_tag }}
         run: |
           set -euo pipefail
 
@@ -319,11 +349,18 @@ jobs:
           echo "  → ${immutable}"
           docker buildx imagetools create "${annotations[@]}" --tag "${repo}:${immutable}" "${refs[@]}"
 
+          if [[ -n "$RELEASE_TAG" ]]; then
+            versioned="full-${tag}-${RELEASE_TAG}"
+            echo "  → ${versioned}"
+            docker buildx imagetools create "${annotations[@]}" --tag "${repo}:${versioned}" "${refs[@]}"
+          fi
+
   # ── Update last-docker-build tag ────────────────────────────────────────────
   update-tag:
     name: Update build tag
     needs: [check-commits, merge]
-    if: ${{ needs.check-commits.outputs.skip_build != 'true' && needs.merge.result == 'success' }}
+    # A release can point at an older commit; do not move the daily-build marker.
+    if: ${{ github.ref_type != 'tag' && needs.check-commits.outputs.skip_build != 'true' && needs.merge.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write

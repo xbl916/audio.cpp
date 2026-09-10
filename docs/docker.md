@@ -36,19 +36,38 @@ The following architectures are supported:
 
 ## Published Images
 
-Docker images are published daily when new commits are available. The images are provided
+Docker images are published when a `v*` Git tag is pushed, daily when new commits are
+available, or through the **Build and publish Docker images** workflow's manual trigger.
+Images are published to `ghcr.io/<owner>/<repository>` (lowercase), so this fork publishes
+to `ghcr.io/xbl916/audio.cpp`. The images are provided
 as multiarch images (amd64/arm64).
 
 Pull the latest images using these tags:
-- **cuda12**: `ghcr.io/0xshug0/audio.cpp:full-cuda12`
-- **cuda13**: `ghcr.io/0xshug0/audio.cpp:full-cuda13`
-- **vulkan**: `ghcr.io/0xshug0/audio.cpp:full-vulkan`
-- **cpu**: `ghcr.io/0xshug0/audio.cpp:full-cpu`
+- **cuda12**: `ghcr.io/xbl916/audio.cpp:full-cuda12`
+- **cuda13**: `ghcr.io/xbl916/audio.cpp:full-cuda13`
+- **vulkan**: `ghcr.io/xbl916/audio.cpp:full-vulkan`
+- **cpu**: `ghcr.io/xbl916/audio.cpp:full-cpu`
 
 Images for a specific day/commit can be found in the
-[versions](https://github.com/0xShug0/audio.cpp/pkgs/container/audio.cpp/versions?filters%5Bversion_type%5D=tagged)
+[versions](https://github.com/xbl916/audio.cpp/pkgs/container/audio.cpp/versions?filters%5Bversion_type%5D=tagged)
 history.
 The format is: `full-<backend>-<date>-<shortsha>`, e.g. `full-cuda12-20260725-db7d2c4`
+
+Pushing a version tag such as `v1.2.3` also publishes `full-cpu-v1.2.3`,
+`full-cuda12-v1.2.3`, `full-cuda13-v1.2.3`, and `full-vulkan-v1.2.3`, while updating
+the usual `full-<backend>` tags. The binaries embed version `1.2.3`. Tag builds run
+even if the same commit was already built by the daily workflow, and do not move
+its `last-docker-build` marker. Use Docker-compatible version tag names containing
+only letters, digits, underscores, dots, and hyphens (at most 116 characters).
+
+After committing the changes you want to release, create and push a new tag:
+
+```bash
+git tag v1.2.3
+git push origin v1.2.3
+# After the Docker workflow succeeds:
+docker pull ghcr.io/xbl916/audio.cpp:full-cuda12-v1.2.3
+```
 
 
 ## Build Images locally
@@ -96,7 +115,7 @@ An additional `<output-dir>` should be mounted for tasks that write files.
 ### CUDA
 
 ```bash
-docker run --rm --gpus all -v "<models-dir>:/models:ro" ghcr.io/0xshug0/audio.cpp:full-cuda12 <cli|server> --model /models/<model> <...>
+docker run --rm --gpus all -v "<models-dir>:/models:ro" ghcr.io/xbl916/audio.cpp:full-cuda12 <cli|server> --model /models/<model> <...>
 ```
 
 ### Vulkan
@@ -106,7 +125,7 @@ docker run --rm --device /dev/dri \
   --group-add "$(getent group render | cut -d: -f3)" \
   --group-add "$(getent group video | cut -d: -f3)" \
   -v "<models-dir>:/models:ro" \
-  ghcr.io/0xshug0/audio.cpp:full-vulkan \
+  ghcr.io/xbl916/audio.cpp:full-vulkan \
   <cli|server> --backend vulkan --model /models/<model> <...>
 ```
 
@@ -119,7 +138,7 @@ writable model directory and expose the server port:
 docker run --rm --gpus all \
   -p 8080:8080 \
   -v "<models-dir>:/app/models" \
-  ghcr.io/0xshug0/audio.cpp:full-cuda12 \
+  ghcr.io/xbl916/audio.cpp:full-cuda12 \
   server --ui --ui-management --host 0.0.0.0 --port 8080 --backend cuda
 ```
 
@@ -131,7 +150,7 @@ docker run --rm --device /dev/dri \
   --group-add "$(getent group video | cut -d: -f3)" \
   -p 8080:8080 \
   -v "<models-dir>:/app/models" \
-  ghcr.io/0xshug0/audio.cpp:full-vulkan \
+  ghcr.io/xbl916/audio.cpp:full-vulkan \
   server --ui --ui-management --host 0.0.0.0 --port 8080 --backend vulkan
 ```
 
@@ -143,7 +162,7 @@ already exist in the configured path.
 ### CPU
 
 ```bash
-docker run --rm -v "<models-dir>:/models:ro" ghcr.io/0xshug0/audio.cpp:full-cpu <cli|server> --model /models/<model> <...>
+docker run --rm -v "<models-dir>:/models:ro" ghcr.io/xbl916/audio.cpp:full-cpu <cli|server> --model /models/<model> <...>
 ```
 
 See the fully working [examples](#examples) below.

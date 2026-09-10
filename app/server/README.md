@@ -364,7 +364,17 @@ curl http://127.0.0.1:8080/v1/audio/transcriptions \
   -F file=@/path/to/input.wav
 ```
 
-`file` and `model` are required; `language` is optional. Uploaded WAV bytes are decoded in memory and are not written to a temporary file.
+`file` and `model` are required; `language` is optional. Native PCM/float WAV uploads are decoded in memory. On Linux/macOS, other audio encodings are automatically decoded using `ffmpeg` on the server PATH; the client filename and MIME type do not determine the format.
+
+Automatic decoding supports MP3, FLAC, M4A/MP4, AAC, OGG (Vorbis/Opus), WebM, AIFF, CAF, and other supported audio containers, depending on the installed FFmpeg codecs. It selects the first audio stream, preserves sample rate and channel count, and converts to float PCM WAV; model preprocessing performs any required resampling/downmixing. This also applies to multipart `stream=true` and `/v1/audio/alignments`. JSON server paths, TTS references, and the raw PCM `/live` endpoint keep their existing input formats.
+
+The CPU, CUDA, and Vulkan Docker images already include FFmpeg. For a native Linux installation, install it with `apt-get install ffmpeg` (or your distribution's equivalent). Native Windows builds retain WAV support; automatic decoding currently requires a POSIX server. Non-native uploads use a private temporary directory, removed after success or failure. Uploads and decoded WAV are limited to less than 256 MiB, and decoding has a 60-second deadline. Invalid/unsupported files return HTTP 400, size limits return 413, and an unavailable decoder returns 503. No client-side conversion is required:
+
+```bash
+curl http://127.0.0.1:8080/v1/audio/transcriptions \
+  -F model=qwen3-asr \
+  -F file=@/path/to/input.mp3
+```
 
 For streaming-capable ASR models configured with `mode: "streaming"`, pass `stream=true` to receive OpenAI-style transcription SSE:
 
@@ -430,7 +440,7 @@ curl http://127.0.0.1:8080/v1/audio/alignments \
   -F file=@/path/to/input.wav
 ```
 
-`file`, `model`, and `text` are required; `language` is optional. The selected model must be configured with `task: "align"` and `mode: "offline"`. Uploaded WAV bytes are decoded in memory and are not written to a temporary file. The response includes word timestamps in seconds plus sample offsets.
+`file`, `model`, and `text` are required; `language` is optional. The selected model must be configured with `task: "align"` and `mode: "offline"`. Native PCM/float WAV uploads are decoded in memory. On Linux/macOS, other audio encodings are automatically decoded using `ffmpeg` on the server PATH; the client filename and MIME type do not determine the format. The response includes word timestamps in seconds plus sample offsets.
 
 ### `POST /v1/audio/transcriptions/live`
 
