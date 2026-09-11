@@ -217,6 +217,30 @@
     ],
     "session": [
       {
+        "name": "ar_device",
+        "type": "int",
+        "description": "AR CUDA device index; -1 inherits the session device.",
+        "required": false,
+        "min": -1,
+        "default": -1
+      },
+      {
+        "name": "nar_device",
+        "type": "int",
+        "description": "NAR CUDA device index; -1 inherits the session device.",
+        "required": false,
+        "min": -1,
+        "default": -1
+      },
+      {
+        "name": "vae_device",
+        "type": "int",
+        "description": "VAE CUDA device index; -1 inherits the session device.",
+        "required": false,
+        "min": -1,
+        "default": -1
+      },
+      {
         "name": "weight_type",
         "type": "enum",
         "values": [

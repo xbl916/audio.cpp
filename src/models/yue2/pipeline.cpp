@@ -114,8 +114,12 @@ public:
         size_t ar_prefill_graph_arena_bytes,
         size_t ar_decode_graph_arena_bytes,
         size_t nar_graph_arena_bytes,
-        size_t vae_graph_arena_bytes)
-        : execution(&execution),
+        size_t vae_graph_arena_bytes,
+        Yue2DevicePlacement devices)
+        : contexts(execution),
+          ar_execution(&contexts.get(devices.ar)),
+          nar_execution(&contexts.get(devices.nar)),
+          vae_execution(&contexts.get(devices.vae)),
           assets(std::move(assets)),
           tokenizer(this->assets->tiktoken_path),
           model_weight_type(model_weight_type),
@@ -307,6 +311,9 @@ public:
     }
 
     runtime::AudioBuffer run(const Yue2Request & request) {
+        nar.reset();
+        ar.reset();
+        vae.reset();
         const auto plan_start = Clock::now();
         auto planned = plan(request);
         engine::debug::timing_log_scalar("yue2.plan_ms", engine::debug::elapsed_ms(plan_start, Clock::now()));
@@ -317,8 +324,8 @@ public:
         auto latents = synthesize_latents(semantic, request.generation, request.nar_noise, request.seed);
         engine::debug::timing_log_scalar("yue2.nar_ms", engine::debug::elapsed_ms(nar_start, Clock::now()));
         const int64_t frames = static_cast<int64_t>(latents.size()) / assets->config.model.latent_dim;
-        ar.reset();
         nar.reset();
+        ar.reset();
         const auto vae_start = Clock::now();
         auto audio = decode_audio(latents, frames);
         engine::debug::timing_log_scalar("yue2.vae_decode_ms", engine::debug::elapsed_ms(vae_start, Clock::now()));
@@ -332,11 +339,11 @@ public:
         if (vae) {
             vae->release_runtime_graphs();
         }
-        if (ar) {
-            ar->release_runtime_graphs();
-        }
         if (nar) {
             nar->release_runtime_graphs();
+        }
+        if (ar) {
+            ar->release_runtime_graphs();
         }
     }
 
@@ -346,8 +353,9 @@ private:
             return;
         }
         const auto start = Clock::now();
+        engine::debug::timing_log_scalar("yue2.ar.device", ar_execution->config().device);
         ar = std::make_unique<Yue2ArRuntime>(
-            *execution,
+            *ar_execution,
             assets,
             model_weight_type,
             model_weight_context_bytes,
@@ -372,9 +380,10 @@ private:
         options.graph_arena_bytes = vae_graph_arena_bytes;
         options.weight_storage_type = vae_weight_type;
         const auto start = Clock::now();
+        engine::debug::timing_log_scalar("yue2.vae.device", vae_execution->config().device);
         vae = std::make_unique<codecs::OobleckAudioVaeRuntime>(
             assets->vae_weights,
-            *execution,
+            *vae_execution,
             std::move(config),
             options);
         engine::debug::timing_log_scalar("yue2.vae.init_ms", engine::debug::elapsed_ms(start));
@@ -385,8 +394,9 @@ private:
             return;
         }
         const auto start = Clock::now();
+        engine::debug::timing_log_scalar("yue2.nar.device", nar_execution->config().device);
         nar = std::make_unique<Yue2NarRuntime>(
-            *execution,
+            *nar_execution,
             assets,
             model_weight_type,
             model_weight_context_bytes,
@@ -394,7 +404,10 @@ private:
         engine::debug::timing_log_scalar("yue2.nar.init_ms", engine::debug::elapsed_ms(start));
     }
 
-    core::ExecutionContext * execution = nullptr;
+    Yue2DeviceContexts contexts;
+    core::ExecutionContext * ar_execution;
+    core::ExecutionContext * nar_execution;
+    core::ExecutionContext * vae_execution;
     std::shared_ptr<const Yue2Assets> assets;
     Yue2TextTokenizer tokenizer;
     assets::TensorStorageType model_weight_type = assets::TensorStorageType::Native;
@@ -420,7 +433,8 @@ Yue2PipelineRuntime::Yue2PipelineRuntime(
     size_t ar_prefill_graph_arena_bytes,
     size_t ar_decode_graph_arena_bytes,
     size_t nar_graph_arena_bytes,
-    size_t vae_graph_arena_bytes)
+    size_t vae_graph_arena_bytes,
+    Yue2DevicePlacement devices)
     : impl_(std::make_unique<Impl>(
           execution,
           std::move(assets),
@@ -431,7 +445,8 @@ Yue2PipelineRuntime::Yue2PipelineRuntime(
           ar_prefill_graph_arena_bytes,
           ar_decode_graph_arena_bytes,
           nar_graph_arena_bytes,
-          vae_graph_arena_bytes)) {}
+          vae_graph_arena_bytes,
+          devices)) {}
 
 Yue2PipelineRuntime::~Yue2PipelineRuntime() = default;
 

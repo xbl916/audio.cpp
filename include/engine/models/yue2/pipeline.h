@@ -5,6 +5,7 @@
 #include "engine/framework/core/execution_context.h"
 #include "engine/framework/runtime/session.h"
 #include "engine/models/yue2/assets.h"
+#include "engine/models/yue2/device_placement.h"
 #include "engine/models/yue2/request.h"
 #include "engine/models/yue2/tokenizer_text.h"
 
@@ -25,7 +26,8 @@ public:
         size_t ar_prefill_graph_arena_bytes,
         size_t ar_decode_graph_arena_bytes,
         size_t nar_graph_arena_bytes,
-        size_t vae_graph_arena_bytes);
+        size_t vae_graph_arena_bytes,
+        Yue2DevicePlacement devices = {});
     ~Yue2PipelineRuntime();
 
     Yue2Plan plan(const Yue2Request & request);

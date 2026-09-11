@@ -1,4 +1,5 @@
 #include "engine/models/yue2/nar_runtime.h"
+#include "engine/models/yue2/prefix_transfer.h"
 
 #include "engine/framework/core/backend.h"
 #include "engine/framework/debug/profiler.h"
@@ -444,8 +445,16 @@ struct Yue2NarRuntime::Impl {
                     key.type != GGML_TYPE_F16 || value.type != GGML_TYPE_F16) {
                     throw std::runtime_error("Yue2 NAR prefix cache tensor shape mismatch");
                 }
-                ar_keys.push_back(key);
-                ar_values.push_back(value);
+                auto local_prefix = [&](const core::TensorValue & source) {
+                    if (!yue2_prefix_needs_transfer(source.tensor, owner.execution.backend())) {
+                        return source;
+                    }
+                    auto local = core::make_tensor(input_build, source.type, source.shape);
+                    ggml_set_input(local.tensor);
+                    return local;
+                };
+                ar_keys.push_back(local_prefix(key));
+                ar_values.push_back(local_prefix(value));
             }
             auto nar_hidden = engine::modules::LinearModule({config.latent_dim, config.hidden_size, true})
                                   .build(build, state, owner.weights->vae2llm);
@@ -490,23 +499,45 @@ struct Yue2NarRuntime::Impl {
             engine::debug::timing_log_scalar("yue2.nar.graph.build_ms", engine::debug::elapsed_ms(build_start));
             const auto alloc_start = Clock::now();
             input_buffer = ggml_backend_alloc_ctx_tensors(input_ctx.get(), owner.execution.backend());
-            gallocr = ggml_gallocr_new(ggml_backend_get_default_buffer_type(owner.execution.backend()));
-            if (input_buffer == nullptr || gallocr == nullptr ||
-                !ggml_gallocr_reserve(gallocr, graph) ||
-                !ggml_gallocr_alloc_graph(gallocr, graph)) {
-                throw std::runtime_error("failed to allocate Yue2 NAR graph");
+            if (input_buffer == nullptr) {
+                throw std::runtime_error("failed to allocate Yue2 NAR inputs and prefix cache");
             }
-            engine::debug::timing_log_scalar("yue2.nar.graph.alloc_ms", engine::debug::elapsed_ms(alloc_start));
-            std::vector<int32_t> pos_values(static_cast<size_t>(nar_length));
-            for (int64_t i = 0; i < nar_length; ++i) {
-                pos_values[static_cast<size_t>(i)] = static_cast<int32_t>(ar_length + i);
+            try {
+                for (size_t layer = 0; layer < ar_keys.size(); ++layer) {
+                    if (ar_keys[layer].tensor != ar_state.keys[layer].tensor) {
+                        yue2_copy_prefix_tensor(ar_state.keys[layer].tensor, ar_keys[layer].tensor);
+                    }
+                    if (ar_values[layer].tensor != ar_state.values[layer].tensor) {
+                        yue2_copy_prefix_tensor(ar_state.values[layer].tensor, ar_values[layer].tensor);
+                    }
+                }
+                gallocr = ggml_gallocr_new(ggml_backend_get_default_buffer_type(owner.execution.backend()));
+                if (gallocr == nullptr ||
+                    !ggml_gallocr_reserve(gallocr, graph) ||
+                    !ggml_gallocr_alloc_graph(gallocr, graph)) {
+                    throw std::runtime_error("failed to allocate Yue2 NAR graph");
+                }
+                engine::debug::timing_log_scalar("yue2.nar.graph.alloc_ms", engine::debug::elapsed_ms(alloc_start));
+                std::vector<int32_t> pos_values(static_cast<size_t>(nar_length));
+                for (int64_t i = 0; i < nar_length; ++i) {
+                    pos_values[static_cast<size_t>(i)] = static_cast<int32_t>(ar_length + i);
+                }
+                ggml_backend_tensor_set(positions.tensor, pos_values.data(), 0, pos_values.size() * sizeof(int32_t));
+                engine::debug::timing_log_scalar("yue2.nar.graph.static_upload_ms", 0.0);
+                engine::debug::timing_log_scalar("yue2.nar.graph.frames", frames);
+                engine::debug::timing_log_scalar("yue2.nar.graph.ar_tokens", ar_length);
+                engine::debug::timing_log_scalar("yue2.nar.graph.nar_tokens", nar_length);
+                engine::debug::timing_log_scalar("yue2.nar.graph.total_ms", engine::debug::elapsed_ms(total_start));
+            } catch (...) {
+                // A failed constructor does not run ~Graph().
+                if (gallocr) {
+                    ggml_gallocr_free(gallocr);
+                    gallocr = nullptr;
+                }
+                ggml_backend_buffer_free(input_buffer);
+                input_buffer = nullptr;
+                throw;
             }
-            ggml_backend_tensor_set(positions.tensor, pos_values.data(), 0, pos_values.size() * sizeof(int32_t));
-            engine::debug::timing_log_scalar("yue2.nar.graph.static_upload_ms", 0.0);
-            engine::debug::timing_log_scalar("yue2.nar.graph.frames", frames);
-            engine::debug::timing_log_scalar("yue2.nar.graph.ar_tokens", ar_length);
-            engine::debug::timing_log_scalar("yue2.nar.graph.nar_tokens", nar_length);
-            engine::debug::timing_log_scalar("yue2.nar.graph.total_ms", engine::debug::elapsed_ms(total_start));
         }
 
         ~Graph() {
@@ -695,10 +726,14 @@ struct Yue2NarRuntime::Impl {
                       noise.begin());
             noise_slice_ms += engine::debug::elapsed_ms(slice_start);
             const auto prefill_start = Clock::now();
+            // Drop the previous graph before AR replaces its borrowed cache and
+            // before allocating the next chunk's workspaces.
+            graph.reset();
             auto ar_state = prefill_state(ar_tokens);
             prefill_ms += engine::debug::elapsed_ms(prefill_start);
             const auto solve_start = Clock::now();
             auto chunk = solve_chunk(ar_state, noise, ode_steps);
+            graph.reset();
             solve_ms += engine::debug::elapsed_ms(solve_start);
             const auto append_start = Clock::now();
             out.insert(out.end(), chunk.begin(), chunk.end());

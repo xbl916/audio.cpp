@@ -75,6 +75,69 @@ Select the F32 VAE:
 
 The component paths are relative to `--model`; absolute paths are rejected.
 
+## Multiple CUDA devices (experimental)
+
+AR, NAR and VAE can use separate CUDA devices through session options
+`yue2.ar_device`, `yue2.nar_device` and `yue2.vae_device`. Each defaults to `-1`,
+which inherits the session's device. Explicit indices require a CUDA backend;
+invalid indices fail instead of silently falling back. Components assigned to
+the same device share a backend context.
+
+This is component placement, not tensor parallelism: generation stages remain
+sequential, and a single component's weights, KV cache and compute workspace must
+still fit on its assigned GPU. Two 8 GB cards do not become one 16 GB device.
+Q4 reduces weights but does not quantize all runtime allocations. The
+`*_graph_arena_mb` options control host graph metadata arenas, not GPU memory caps.
+
+For an RTX 2080 SUPER + Tesla P4, use the **CUDA 12** image or binary archive.
+[CUDA 13 removed compilation and library support for pre-Turing architectures](https://docs.nvidia.com/cuda/archive/13.0.0/cuda-toolkit-release-notes/index.html),
+including Pascal P4. Expose both GPUs to the container (`--gpus all`), then check
+`audiocpp_cli --list-devices` **inside that same environment**. Device indices may
+change with container visibility and `CUDA_VISIBLE_DEVICES`.
+
+If the list identifies the 2080 SUPER as CUDA:0 and P4 as CUDA:1, append these
+options to the CLI generation command above:
+
+```bash
+--device 0 \
+--session-option yue2.model_gguf=yue2-3b-q4_0.gguf \
+--session-option yue2.ar_device=0 \
+--session-option yue2.nar_device=1 \
+--session-option yue2.vae_device=0
+```
+
+For the server, start with `--backend cuda` and add the same keys to the Yue2
+model entry in its configuration file:
+
+```json
+"session_options": {
+  "yue2.model_gguf": "yue2-3b-q4_0.gguf",
+  "yue2.ar_device": "0",
+  "yue2.nar_device": "1",
+  "yue2.vae_device": "0"
+}
+```
+
+Cross-device AR prefix caches are copied into NAR-owned memory through bounded
+host staging; this does not require NVLink or CUDA peer access. Both cache copies
+exist during NAR computation, and PCIe transfer adds latency. NAR's previous
+chunk graph is released before preparing another prefix. AR/NAR are released
+before VAE decoding, and the preceding request's VAE is released before starting
+another generation.
+
+This configuration has CPU unit coverage for option validation and cache copies;
+successful full Yue2 inference on two 8 GB GPUs has **not** been verified. Use
+`--log` to capture the failing stage if one component still runs out of memory.
+In a CUDA test build, an optional small two-device transfer check is available:
+
+```bash
+cmake --build <build-dir> --target yue2_device_placement_test
+<build-dir>/bin/yue2_device_placement_test --cuda
+```
+
+The test requires CUDA devices 0 and 1, copies synthetic prefix data in both
+directions, and does not load a model. Ordinary CTest runs use CPU only.
+
 ## ABC Conditioning
 
 Use `cot=melody` or `cot=full` to run the symbolic route. External ABC requires

@@ -2781,6 +2781,9 @@ if (ENGINE_BUILD_TESTS OR ENGINE_BUILD_EXTENDED_TESTS OR ENGINE_BUILD_MODEL_TEST
             COMMAND outetts_generation_budget_test
         )
 
+        add_engine_unittest(yue2_device_placement_test tests/unittests/test_yue2_device_placement.cpp)
+        add_test(NAME yue2_device_placement_test COMMAND yue2_device_placement_test)
+
         add_engine_unittest(
             qwen_decoder_packed_projection_test
             tests/unittests/test_qwen_decoder_packed_projections.cpp
