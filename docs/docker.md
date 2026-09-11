@@ -37,14 +37,14 @@ The following architectures are supported:
 ## Published Images
 
 Docker images are published when a `v*` Git tag is pushed or through the
-**Build and publish Docker images** workflow's manual trigger. Normal branch pushes,
+**Build and publish images and binaries** workflow's manual trigger. Normal branch pushes,
 pull requests, and timers do not start builds in this fork. Tag pushes automatically
-build only these two targets:
+compile only these two targets, producing two images and two standalone archives:
 
-| Backend | Architecture | Image |
-| --- | --- | --- |
-| CUDA 12 | linux/amd64 | `ghcr.io/xbl916/audio.cpp:full-cuda12` |
-| CUDA 13 | linux/amd64 | `ghcr.io/xbl916/audio.cpp:full-cuda13` |
+| Backend | Architecture | Image | GitHub Release archive |
+| --- | --- | --- | --- |
+| CUDA 12 | linux/amd64 | `ghcr.io/xbl916/audio.cpp:full-cuda12` | `audio-<tag>-bin-linux-amd64-cuda12.tar.gz` |
+| CUDA 13 | linux/amd64 | `ghcr.io/xbl916/audio.cpp:full-cuda13` | `audio-<tag>-bin-linux-amd64-cuda13.tar.gz` |
 
 The workflow publishes to `ghcr.io/<owner>/<repository>` in lowercase. CPU, Vulkan,
 and arm64 builds are available on demand through the manual inputs below.
@@ -68,6 +68,42 @@ git push origin v1.2.3
 # After the Docker workflow succeeds:
 docker pull ghcr.io/xbl916/audio.cpp:full-cuda12-v1.2.3
 ```
+
+### Standalone Linux CUDA archives
+
+The workflow packages the executables already compiled inside each CUDA amd64
+image, with no second compilation. After image builds and publication succeed, it
+creates or updates the matching GitHub Release with both archives and SHA-256
+checksum files. Tags containing a hyphen create a prerelease when no release exists.
+
+Each archive includes `audiocpp_cli`, `audiocpp_server`, `audiocpp_model_manager`,
+`model_perf`, project shared libraries, resolved CUDA/system runtime libraries,
+`model_specs/`, `tools/`, version metadata, and dependency instructions. Top-level
+launchers locate the bundled libraries. NVIDIA driver libraries and glibc remain
+host dependencies; model weights are downloaded separately.
+
+Requirements: Linux amd64 with Ubuntu 24.04 / glibc 2.39 or a compatible newer
+system, and an NVIDIA driver compatible with the packaged CUDA version (currently
+12.9.2 or 13.3.0). Docker and the CUDA compiler/toolkit are not required to run the
+archive. Install `ffmpeg` for non-WAV ASR uploads; model-management features may
+also require `python3`, `curl`, and `ca-certificates`.
+
+```bash
+# Example: replace v1.2.3 with the desired new release tag.
+gh release download v1.2.3 --repo xbl916/audio.cpp \
+  --pattern 'audio-v1.2.3-bin-linux-amd64-cuda12.tar.gz*'
+sha256sum --check audio-v1.2.3-bin-linux-amd64-cuda12.tar.gz.sha256
+tar -xzf audio-v1.2.3-bin-linux-amd64-cuda12.tar.gz
+cd audio-v1.2.3-bin-linux-amd64-cuda12
+./audiocpp_server --config /absolute/path/to/server.json
+```
+
+Use the top-level launchers instead of invoking the files in `bin/` directly.
+Manual runs on a branch retain archives as Actions artifacts; manual runs on a
+version tag also upload archives for the selected CUDA amd64 backends to that
+Release. CPU, Vulkan, and arm64 selections continue to produce images only.
+Existing tags retain their original workflow, so this packaging applies to new
+tags containing the updated configuration.
 
 ### Manual builds for other targets
 
@@ -130,8 +166,9 @@ gh workflow run server-memory-guard.yml --repo xbl916/audio.cpp --ref main
 
 ### Optional binary release packages
 
-Tag pushes only trigger Docker builds. The separate **Binary release (manual)**
-workflow builds native Windows/Linux/macOS packages and must be started explicitly.
+Tag pushes trigger the two CUDA images and their Linux amd64 archives described
+above. The separate **Binary release (manual)** workflow builds the broader native
+Windows/Linux/macOS packages and must be started explicitly.
 It does not build Docker images. Use a ref containing this updated workflow:
 
 ```bash

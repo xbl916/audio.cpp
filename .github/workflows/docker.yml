@@ -1,6 +1,7 @@
 # audio.cpp — Build and publish Docker images
 #
 # Automatic builds: CUDA 12 and CUDA 13 on amd64 only.
+# Also packages Linux amd64 CUDA binaries from those images for GitHub Releases.
 # Manual builds can select cpu/cuda12/cuda13/vulkan and amd64/arm64.
 # Produces images on ghcr.io:
 #   full-cpu                     (latest, mutable)
@@ -13,7 +14,7 @@
 #   full-vulkan-YYYYMMDD-HHHHHHH (pinned to date + short SHA, immutable)
 #   full-<backend>-v<version>    (created by version-tag builds)
 
-name: Build and publish Docker images
+name: Build and publish images and binaries
 
 on:
   push:
@@ -57,6 +58,7 @@ jobs:
       image_repo: ${{ steps.image_repo.outputs.image_repo }}
       build_matrix: ${{ steps.matrix.outputs.build_matrix }}
       merge_matrix: ${{ steps.matrix.outputs.merge_matrix }}
+      binary_backends: ${{ steps.matrix.outputs.binary_backends }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -64,6 +66,9 @@ jobs:
       - name: Resolve revision
         id: revision
         run: echo "short_sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Test standalone archive packaging
+        run: python3 tests/unittests/test_package_cuda_binaries.py
 
       - name: Select build targets
         id: matrix
@@ -100,9 +105,11 @@ jobs:
                   }
                   builds.append(entry)
           merges = [{'tag': backend, 'arches': ' '.join(arches)} for backend in backends]
+          binaries = [backend for backend in backends if backend.startswith('cuda') and 'amd64' in arches]
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               print('build_matrix=' + json.dumps({'include': builds}), file=output)
               print('merge_matrix=' + json.dumps({'include': merges}), file=output)
+              print('binary_backends=' + ' '.join(binaries), file=output)
           print('Selected targets: ' + ', '.join(f"{entry['tag']}/{entry['arch']}" for entry in builds))
           PY
 
@@ -185,6 +192,35 @@ jobs:
             ${{ matrix.cuda_version && format('CUDA_VERSION={0}', matrix.cuda_version) || '' }}
           cache-from: type=registry,ref=ghcr.io/${{ needs.metadata.outputs.image_repo }}:cache-${{ matrix.arch }}-${{ matrix.tag }}
           cache-to: type=registry,ref=ghcr.io/${{ needs.metadata.outputs.image_repo }}:cache-${{ matrix.arch }}-${{ matrix.tag }},mode=max
+
+      - name: Package Linux amd64 CUDA binaries from image
+        if: ${{ matrix.arch == 'amd64' && startsWith(matrix.tag, 'cuda') }}
+        env:
+          IMAGE: ghcr.io/${{ needs.metadata.outputs.image_repo }}@${{ steps.push.outputs.digest }}
+          PACKAGE_VERSION: v${{ needs.metadata.outputs.app_version }}
+          CUDA_BACKEND: ${{ matrix.tag }}
+          CUDA_VERSION: ${{ matrix.cuda_version }}
+          REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # No container entrypoint, GPU, or second compilation is involved.
+          docker run --rm --platform linux/amd64 --network none \
+            --user "$(id -u):$(id -g)" \
+            --volume "$PWD:/source:ro" --volume "$PWD/dist:/dist" \
+            --entrypoint python3 "$IMAGE" /source/tools/package_cuda_binaries.py \
+            --output-dir /dist --source-dir /source --version "$PACKAGE_VERSION" \
+            --backend "$CUDA_BACKEND" --cuda-version "$CUDA_VERSION" --revision "$REVISION"
+          (cd dist && sha256sum --check ./*.sha256)
+
+      - name: Save binary archive
+        if: ${{ matrix.arch == 'amd64' && startsWith(matrix.tag, 'cuda') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: binary-linux-amd64-${{ matrix.tag }}
+          path: dist/*
+          compression-level: 0
+          if-no-files-found: error
 
       - name: Upload digest
         shell: bash
@@ -285,4 +321,46 @@ jobs:
             versioned="full-${tag}-${RELEASE_TAG}"
             echo "  → ${versioned}"
             docker buildx imagetools create "${annotations[@]}" --tag "${repo}:${versioned}" "${refs[@]}"
+          fi
+
+  publish-binaries:
+    name: Publish CUDA binary archives
+    needs: [metadata, build, merge]
+    if: ${{ needs.metadata.outputs.release_tag != '' && needs.metadata.outputs.binary_backends != '' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download binary archives
+        uses: actions/download-artifact@v8
+        with:
+          pattern: binary-linux-amd64-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish archives to the tag's GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.metadata.outputs.release_tag }}
+          BINARY_BACKENDS: ${{ needs.metadata.outputs.binary_backends }}
+        run: |
+          set -euo pipefail
+          cd dist
+          files=()
+          for backend in $BINARY_BACKENDS; do
+            archive="audio-${RELEASE_TAG}-bin-linux-amd64-${backend}.tar.gz"
+            test -s "$archive"
+            sha256sum --check "${archive}.sha256"
+            files+=("$archive" "${archive}.sha256")
+          done
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${files[@]}" --clobber
+          else
+            flags=()
+            if [[ "$RELEASE_TAG" == *-* ]]; then
+              flags+=(--prerelease)
+            fi
+            gh release create "$RELEASE_TAG" "${files[@]}" --verify-tag \
+              --title "$RELEASE_TAG" --generate-notes "${flags[@]}"
           fi
